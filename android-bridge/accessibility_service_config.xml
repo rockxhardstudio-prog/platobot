@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+Place at res/xml/accessibility_service_config.xml in the bridge app,
+and reference it from the <service> tag in AndroidManifest.xml:
+
+  <service
+      android:name=".PlatoAccessibilityService"
+      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+      android:exported="false">
+      <intent-filter>
+          <action android:name="android.accessibilityservice.AccessibilityService" />
+      </intent-filter>
+      <meta-data
+          android:name="android.accessibilityservice.config"
+          android:resource="@xml/accessibility_service_config" />
+  </service>
+
+Then enable it manually once on the bot phone under
+Settings -> Accessibility -> [Your Bridge App].
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowContentChanged|typeViewTextChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagReportViewIds|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:notificationTimeout="100"
+    android:packageNames="com.platoapp.REPLACE_ME" />
