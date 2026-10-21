@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from bot.commands.router import handle_message, plato_client
 from bot.database.db import init_db
 from bot.models.message import IncomingMessage
+from bot.services.mvp import get_bridge_state, update_bridge_heartbeat
 
 app = FastAPI(title="Plato Group Bot Backend")
 
@@ -21,6 +22,18 @@ class InboxPayload(BaseModel):
     text: str
     is_self: bool = False
     timestamp: str | None = None
+
+
+class BridgeHeartbeatPayload(BaseModel):
+    current_group_id: str | None = None
+    current_group_title: str | None = None
+    last_error: str | None = None
+    ack_navigation: bool = False
+
+
+class BridgeResumePayload(BaseModel):
+    group_id: str | None = None
+    group_title: str | None = None
 
 
 @app.post("/inbox")
@@ -46,6 +59,28 @@ def outbox_ack(outbox_id: int):
 @app.post("/outbox/{outbox_id}/fail")
 def outbox_fail(outbox_id: int, reason: str = ""):
     plato_client.fail(outbox_id, reason)
+    return {"ok": True}
+
+
+@app.get("/bridge-state")
+def bridge_state():
+    return get_bridge_state()
+
+
+@app.post("/bridge-state/heartbeat")
+def bridge_heartbeat(payload: BridgeHeartbeatPayload):
+    return update_bridge_heartbeat(
+        payload.current_group_id,
+        payload.current_group_title,
+        payload.last_error,
+        payload.ack_navigation,
+    )
+
+
+@app.post("/bridge-state/resume")
+def bridge_resume(payload: BridgeResumePayload):
+    from bot.services.mvp import resume_from_off
+    resume_from_off(payload.group_id, payload.group_title)
     return {"ok": True}
 
 

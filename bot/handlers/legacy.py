@@ -79,5 +79,7 @@ HANDLERS = {
     "spam": _handle_spam,
     "spamset": _handle_spamset,
     "inviteset": _handle_inviteset,
+    "setinvite": _handle_inviteset,
+    "sinv": _handle_inviteset,
     "add": _handle_add,
 }

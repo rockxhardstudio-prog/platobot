@@ -64,7 +64,9 @@ def bounds_center(bounds: str) -> tuple[int, int]:
 
 
 def normalize_for_adb_input(text: str) -> str:
-    value = text.encode("ascii", errors="ignore").decode("ascii")
+    from bot.utils.scifi import scifi_transliterate_to_ascii
+    value = scifi_transliterate_to_ascii(text)
+    value = value.encode("ascii", errors="ignore").decode("ascii")
     value = " ".join(value.splitlines()).strip()
     value = value.replace("\\", "")
     value = value.replace("%", "\\%").replace(" ", "%s")
@@ -78,6 +80,18 @@ class AdbClient:
     def __init__(self, adb_path: str, serial: str | None = None):
         self.adb_path = adb_path
         self.serial = serial or None
+        self._has_adb_keyboard: bool = False
+
+    def check_adb_keyboard(self) -> bool:
+        return self._has_adb_keyboard
+
+    def detect_adb_keyboard(self) -> bool:
+        try:
+            code, stdout, _ = self.shell("pm path com.android.adbkeyboard", timeout=5)
+            self._has_adb_keyboard = bool(code == 0 and "package:" in stdout)
+        except Exception:
+            self._has_adb_keyboard = False
+        return self._has_adb_keyboard
 
     def run(self, *arguments: str, timeout: int = 20) -> tuple[int, str, str]:
         command = [self.adb_path]
@@ -100,12 +114,15 @@ class AdbClient:
 
     def dump_ui(self) -> str:
         code, stdout, _ = self.shell(
-            "uiautomator dump --compressed /sdcard/plato-bridge-window.xml >/dev/null 2>&1 && cat /sdcard/plato-bridge-window.xml",
+            "rm -f /sdcard/plato-bridge-window.xml && uiautomator dump --compressed /sdcard/plato-bridge-window.xml >/dev/null 2>&1 && cat /sdcard/plato-bridge-window.xml",
             timeout=15,
         )
         if code == 0 and stdout.lstrip().startswith("<?xml"):
             return stdout
-        self.shell("uiautomator", "dump", "/sdcard/plato-bridge-window.xml", timeout=15)
+        self.shell(
+            "input keyevent 224 >/dev/null 2>&1 || true; settings delete secure enabled_accessibility_services >/dev/null 2>&1 || true; rm -f /sdcard/plato-bridge-window.xml && uiautomator dump /sdcard/plato-bridge-window.xml",
+            timeout=15,
+        )
         code, stdout, stderr = self.run("exec-out", "cat", "/sdcard/plato-bridge-window.xml", timeout=15)
         if code != 0 or not stdout.lstrip().startswith("<?xml"):
             raise RuntimeError(f"Could not read UI dump: {stderr or stdout}")
@@ -116,7 +133,8 @@ class AdbClient:
         self.shell("input", "tap", str(x), str(y))
 
     def clear_text_field(self) -> None:
-        self.shell("(input keycombination KEYCODE_CTRL_LEFT KEYCODE_A || true) && input keyevent 67", timeout=5)
+        del_keys = " ".join(["67"] * 60)
+        self.shell(f"input keyevent 123 {del_keys}", timeout=8)
 
     def type_text(self, text: str) -> None:
         safe_text = normalize_for_adb_input(text)
@@ -130,7 +148,9 @@ class AdbClient:
         send_bounds: str,
         text: str,
         reply_bounds: str | None = None,
-        reply_tap_coords: tuple[int, int] = (229, 1756),
+        reply_tap_coords: tuple[int, int] = (229, 1572),
+        send_y_open: int | None = None,
+        has_draft: bool = False,
     ) -> bool:
         safe_text = normalize_for_adb_input(text)
         if not safe_text:
@@ -138,26 +158,51 @@ class AdbClient:
 
         ix, iy = bounds_center(input_bounds)
         sx, sy = bounds_center(send_bounds)
+        target_send_y = send_y_open if send_y_open is not None else getattr(config, "bridge_send_y_open", 1171)
+        rep_x, rep_y = reply_tap_coords
 
         cmds = []
+        used_reply = False
         if reply_bounds:
             try:
                 rx, ry = bounds_center(reply_bounds)
-                rep_x, rep_y = reply_tap_coords
                 if 450 <= ry <= 2180:
                     cmds.append(
-                        f"(input swipe {rx} {ry} {rx} {ry} 450 && sleep 0.22 && input tap {rep_x} {rep_y} && sleep 0.15 || true)"
+                        f"(input swipe {rx} {ry} {rx} {ry} 450 && sleep 0.15 && input tap {rep_x} {rep_y} && sleep 0.08 || true)"
                     )
+                    used_reply = True
             except Exception:
                 pass
 
-        cmds.append(f"input tap {ix} {iy}")
-        cmds.append("(input keycombination KEYCODE_CTRL_LEFT KEYCODE_A || true) && input keyevent 67")
-        cmds.append(f"input text {safe_text}")
-        cmds.append(f"sleep 0.12 && input tap {sx} 1482")
+        if not used_reply:
+            cmds.append(f"input tap {ix} {iy}")
+
+        if has_draft:
+            del_keys = " ".join(["67"] * 60)
+            cmds.append(f"input keyevent 123 {del_keys}")
+
+        if self.check_adb_keyboard():
+            import base64
+            b64_msg = base64.b64encode(text.encode("utf-8")).decode("ascii")
+            cmds.append(f"am broadcast -a ADB_INPUT_B64 --es msg '{b64_msg}'")
+        else:
+            raw_lines = [l.strip() for l in text.splitlines() if l.strip()]
+            if len(raw_lines) > 1:
+                line_cmds = []
+                for l in raw_lines:
+                    nl = normalize_for_adb_input(l)
+                    if nl:
+                        line_cmds.append(f"input text {nl}")
+                if line_cmds:
+                    cmds.append(" && sleep 0.12 && input keyevent 66 && sleep 0.12 && ".join(line_cmds))
+                else:
+                    cmds.append(f"input text {safe_text}")
+            else:
+                cmds.append(f"input text {safe_text}")
+        cmds.append(f"input tap {sx} {target_send_y}")
 
         full_cmd = " && ".join(cmds)
-        code, stdout, stderr = self.shell(full_cmd, timeout=15)
+        code, stdout, stderr = self.shell(full_cmd, timeout=20)
         return code == 0
 
 
@@ -173,12 +218,155 @@ def current_group(nodes: list[dict[str, object]]) -> str | None:
     return None
 
 
+def _normalize_group_title(text: str | None) -> str:
+    if not text:
+        return ""
+    s = (
+        text.replace("\u039b", "a")
+        .replace("\u03bb", "a")
+        .replace("\u039e", "e")
+        .replace("\u03be", "e")
+        .replace("0", "o")
+    )
+    return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+
+def _titles_match(actual: str | None, expected: str | None) -> bool:
+    if not actual or not expected:
+        return False
+    if actual.strip().lower() == expected.strip().lower():
+        return True
+    na = _normalize_group_title(actual)
+    ne = _normalize_group_title(expected)
+    if not na or not ne:
+        return False
+    if na == ne:
+        return True
+    if ("novablaze" in na or na == "order") and ("novablaze" in ne or ne == "order"):
+        return True
+    if ("staff" in na and "staff" in ne) or (ne in {"staff", "staffgroup"} and "staff" in na):
+        return True
+    return False
+
+
 def group_id_for_title(title: str | None) -> str | None:
-    if title == config.main_group_title:
+    if not title:
+        return None
+    nt = _normalize_group_title(title)
+    if (
+        title == config.main_group_title
+        or nt == _normalize_group_title(config.main_group_title)
+        or "novablaze" in nt
+        or nt == "order"
+    ):
         return config.main_group_id
-    if title == config.storage_group_title:
+    if (
+        title == config.storage_group_title
+        or nt == _normalize_group_title(config.storage_group_title)
+        or "staff" in nt
+    ):
         return config.storage_group_id
     return None
+
+
+def _find_room_bounds(nodes: list[dict[str, object]], target_title: str) -> str | None:
+    target_norm = _normalize_group_title(target_title)
+    # 1. Exact or normalized direct match on group_title / room_title nodes first
+    for pass_num in (1, 2):
+        for node in nodes:
+            rid = str(node.get("resource_id") or "")
+            if pass_num == 1 and rid not in {
+                "com.plato.android:id/plato_group_title",
+                "com.plato.android:id/room_title",
+                "",
+            }:
+                continue
+            if rid == GROUP_TITLE_ID:
+                continue
+            txt = _node_text(node)
+            bounds = str(node.get("bounds") or "")
+            if not txt or not bounds:
+                continue
+            if txt == target_title or txt.lower() == target_title.strip().lower():
+                return bounds
+            nt = _normalize_group_title(txt)
+            if nt and nt == target_norm:
+                return bounds
+            if ("novablaze" in target_norm or target_norm == "order") and ("novablaze" in nt or nt == "order"):
+                return bounds
+            if "staff" in target_norm and "staff" in nt:
+                return bounds
+
+    # 2. Fallback: if target is storage/staff, match STAFF GROUP
+    if target_norm in {"staff", "staffgroup"} or "staff" in target_norm:
+        for node in nodes:
+            txt = _node_text(node)
+            bounds = str(node.get("bounds") or "")
+            nt = _normalize_group_title(txt)
+            if bounds and "staff" in nt:
+                return bounds
+    return None
+
+
+def navigate_to_group(adb: AdbClient, nodes: list[dict[str, object]], target_title: str) -> bool:
+    if not target_title:
+        return False
+    cur = current_group(nodes)
+    if cur == target_title or (
+        cur is not None
+        and _normalize_group_title(cur) == _normalize_group_title(target_title)
+    ) or (
+        cur is not None
+        and "staff" in _normalize_group_title(target_title)
+        and "staff" in _normalize_group_title(cur)
+    ):
+        return True
+
+    if cur is not None:
+        back_node = find_node(nodes, "com.plato.android:id/plato_button_back")
+        if back_node and back_node.get("bounds"):
+            adb.tap_bounds(str(back_node["bounds"]))
+        else:
+            adb.shell("input keyevent 4")
+        time.sleep(0.55)
+        try:
+            nodes = parse_ui_xml(adb.dump_ui())
+        except Exception:
+            return False
+
+    candidate = _find_room_bounds(nodes, target_title)
+    if not candidate:
+        # Check if we need to tap the GROUPS tab in Plato People screen
+        for node in nodes:
+            if (
+                node.get("resource_id") == "com.plato.android:id/notification_tab_title"
+                and _node_text(node).upper() == "GROUPS"
+                and node.get("bounds")
+            ):
+                adb.tap_bounds(str(node["bounds"]))
+                time.sleep(0.45)
+                try:
+                    nodes = parse_ui_xml(adb.dump_ui())
+                    candidate = _find_room_bounds(nodes, target_title)
+                except Exception:
+                    pass
+                break
+
+    if not candidate:
+        # Never leave Plato stranded on the room list: re-open previous or Main GC
+        fallback = _find_room_bounds(nodes, cur or config.main_group_title or "0 R D E R")
+        if fallback:
+            adb.tap_bounds(fallback)
+        return False
+
+    adb.tap_bounds(candidate)
+    time.sleep(0.55)
+    try:
+        verify_nodes = parse_ui_xml(adb.dump_ui())
+        new_cur = current_group(verify_nodes)
+        return _titles_match(new_cur, target_title)
+    except Exception:
+        return False
 
 
 def _bounds_top(bounds: str) -> int:
@@ -188,6 +376,11 @@ def _bounds_top(bounds: str) -> int:
 
 def _bounds_left(bounds: str) -> int:
     match = re.match(r"\[(\d+),", bounds)
+    return int(match.group(1)) if match else 0
+
+
+def _bounds_right(bounds: str) -> int:
+    match = re.search(r"\]\[(\d+),\d+\]", bounds)
     return int(match.group(1)) if match else 0
 
 
@@ -268,6 +461,20 @@ def visible_messages(
     last_known_time = ""
     occurrence_counts: dict[tuple[str, str, str], int] = {}
 
+    self_names = {
+        (config.bridge_visible_username or "").lower(),
+        (config.bridge_visible_user_id or "").lower(),
+        "floatsystem",
+    }
+    for hnode in sorted(
+        (n for n in nodes if n.get("resource_id") == MESSAGE_HEADER_USERNAME_ID and n.get("bounds")),
+        key=lambda n: _bounds_top(str(n.get("bounds") or "")),
+    ):
+        htop = _bounds_top(str(hnode.get("bounds") or ""))
+        htext = _node_text(hnode)
+        if htop < 475 and htext and htext.lower() not in self_names:
+            last_known_other_username = htext
+
     text_nodes = [
         node for node in nodes
         if str(node.get("resource_id") or "") in MESSAGE_TEXT_IDS
@@ -304,6 +511,8 @@ def visible_messages(
             "floatsystem",
         }):
             is_self = True
+        elif not username and av_left < 0 and _bounds_right(bounds) == 868 and _bounds_left(bounds) != 241:
+            is_self = True
 
         if is_self:
             effective_username = config.bridge_visible_username or "floatsystem"
@@ -318,7 +527,7 @@ def visible_messages(
             user_id = effective_username
             message_time = message_time or last_known_time or ""
 
-        reply_bounds = str(container.get("bounds")) if container and container.get("bounds") else bounds
+        reply_bounds = bounds or (str(container.get("bounds")) if container and container.get("bounds") else "")
 
         occ_key = (user_id, message_time, text)
         occ = occurrence_counts.get(occ_key, 0) + 1
@@ -393,7 +602,12 @@ def send_visible_message(adb: AdbClient, nodes: list[dict[str, object]], text: s
         return False
 
     if hasattr(adb, "fast_send"):
-        return adb.fast_send(str(input_node["bounds"]), str(send_node["bounds"]), text)
+        return adb.fast_send(
+            str(input_node["bounds"]),
+            str(send_node["bounds"]),
+            text,
+            has_draft=input_has_draft(nodes),
+        )
 
     adb.tap_bounds(str(input_node["bounds"]))
     time.sleep(0.05)
@@ -455,7 +669,7 @@ def run_concurrent_bridge(
     adb: AdbClient,
     backend_url: str,
     seen: set[str],
-    interval: float = 0.1,
+    interval: float = 0.02,
 ) -> None:
     stop_event = threading.Event()
     wake_sender = threading.Event()
@@ -466,10 +680,13 @@ def run_concurrent_bridge(
         "input_bounds": None,
         "send_bounds": None,
         "last_reply_bounds": None,
+        "last_other_author": "",
+        "has_draft": False,
         "nodes": [],
     }
     state_lock = threading.Lock()
     chat_history: list[tuple[str, str, str, bool]] = []
+    last_heartbeat_ts = 0.0
 
     def align_and_extract_new(current_msgs: list[VisibleMessage]) -> list[VisibleMessage]:
         nonlocal chat_history
@@ -516,9 +733,10 @@ def run_concurrent_bridge(
         return new_msgs
 
     def reader_loop():
+        nonlocal chat_history, last_heartbeat_ts
         while not stop_event.is_set():
             if is_sending.is_set():
-                time.sleep(0.05)
+                time.sleep(0.02)
                 continue
             try:
                 xml_dump = adb.dump_ui()
@@ -528,20 +746,33 @@ def run_concurrent_bridge(
 
                 input_node = find_node(nodes, CHAT_INPUT_ID)
                 send_node = find_node(nodes, SEND_BUTTON_ID)
+                draft_present = input_has_draft(nodes)
 
                 with state_lock:
+                    prev_group_id = shared_state["group_id"]
+                    if prev_group_id and group_id and prev_group_id != group_id:
+                        chat_history.clear()
+                        shared_state["last_reply_bounds"] = None
                     shared_state["group_id"] = group_id
                     shared_state["title"] = title
                     shared_state["nodes"] = nodes
+                    shared_state["has_draft"] = draft_present
                     if input_node:
                         shared_state["input_bounds"] = str(input_node["bounds"])
                     if send_node:
                         shared_state["send_bounds"] = str(send_node["bounds"])
 
+                ingested = 0
                 if group_id:
-                    all_vis = visible_messages(nodes, group_id)
+                    with state_lock:
+                        prev_author = str(shared_state.get("last_other_author") or "")
+                    all_vis = visible_messages(nodes, group_id, previous_known_other_author=prev_author)
+                    for vm in all_vis:
+                        if not vm.is_self and vm.user_id and vm.user_id != "unknown":
+                            prev_author = vm.user_id
+                    with state_lock:
+                        shared_state["last_other_author"] = prev_author
                     new_msgs = align_and_extract_new(all_vis)
-                    ingested = 0
                     for message in new_msgs:
                         if message.message_id in seen:
                             continue
@@ -563,10 +794,109 @@ def run_concurrent_bridge(
                     if ingested > 0:
                         wake_sender.set()
 
+                now_ts = time.time()
+                on_room_list = (title is None) and (
+                    find_node(nodes, "com.plato.android:id/groups_recycler_view") is not None
+                    or find_node(nodes, "com.plato.android:id/plato_home_people_pager") is not None
+                )
+                if ingested > 0 or on_room_list or (now_ts - last_heartbeat_ts >= 1.5):
+                    last_heartbeat_ts = now_ts
+                    try:
+                        bstate = post_json(
+                            f"{backend_url.rstrip('/')}/bridge-state/heartbeat",
+                            {"current_group_id": group_id, "current_group_title": title},
+                        )
+                        target_gid = str(bstate.get("target_group_id") or "main")
+                        target_title = str(bstate.get("target_group_title") or config.main_group_title or "-» NOVΛ ⟡ BLΛZΞ «-")
+                        nav_pending = bool(bstate.get("navigation_pending"))
+
+                        if target_gid == "off":
+                            if nav_pending and title is not None:
+                                pending_here = get_json(
+                                    f"{backend_url.rstrip('/')}/outbox?group_id={group_id}&claim=false&limit=1"
+                                ) if group_id else []
+                                if not pending_here:
+                                    is_sending.set()
+                                    try:
+                                        back_node = find_node(nodes, "com.plato.android:id/plato_button_back")
+                                        if back_node and back_node.get("bounds"):
+                                            adb.tap_bounds(str(back_node["bounds"]))
+                                        else:
+                                            adb.shell("input keyevent 4")
+                                        with state_lock:
+                                            chat_history.clear()
+                                            shared_state["last_reply_bounds"] = None
+                                        post_json(
+                                            f"{backend_url.rstrip('/')}/bridge-state/heartbeat",
+                                            {
+                                                "current_group_id": None,
+                                                "current_group_title": None,
+                                                "ack_navigation": True,
+                                            },
+                                        )
+                                    finally:
+                                        is_sending.clear()
+                            elif nav_pending and title is None:
+                                post_json(
+                                    f"{backend_url.rstrip('/')}/bridge-state/heartbeat",
+                                    {
+                                        "current_group_id": None,
+                                        "current_group_title": None,
+                                        "ack_navigation": True,
+                                    },
+                                )
+                            elif not nav_pending and title is not None:
+                                # User manually entered a GC on the phone! Never kick user out; resume focus.
+                                resumed_gid = group_id or "main"
+                                post_json(
+                                    f"{backend_url.rstrip('/')}/bridge-state/resume",
+                                    {"group_id": resumed_gid, "group_title": title},
+                                )
+                                post_json(
+                                    f"{backend_url.rstrip('/')}/bridge-state/heartbeat",
+                                    {
+                                        "current_group_id": resumed_gid,
+                                        "current_group_title": title,
+                                        "ack_navigation": True,
+                                    },
+                                )
+                        elif (nav_pending and not _titles_match(title, target_title)) or on_room_list:
+                            pending_here = get_json(
+                                f"{backend_url.rstrip('/')}/outbox?group_id={group_id}&claim=false&limit=1"
+                            ) if group_id else []
+                            if not pending_here:
+                                is_sending.set()
+                                try:
+                                    navigate_to_group(adb, nodes, target_title)
+                                    with state_lock:
+                                        chat_history.clear()
+                                        shared_state["last_reply_bounds"] = None
+                                    post_json(
+                                        f"{backend_url.rstrip('/')}/bridge-state/heartbeat",
+                                        {
+                                            "current_group_id": group_id,
+                                            "current_group_title": title,
+                                            "ack_navigation": True,
+                                        },
+                                    )
+                                finally:
+                                    is_sending.clear()
+                        elif nav_pending and _titles_match(title, target_title):
+                            post_json(
+                                f"{backend_url.rstrip('/')}/bridge-state/heartbeat",
+                                {
+                                    "current_group_id": group_id,
+                                    "current_group_title": title,
+                                    "ack_navigation": True,
+                                },
+                            )
+                    except Exception:
+                        pass
+
             except Exception as error:
                 print(f"[bridge reader error] {error}", file=sys.stderr, flush=True)
 
-            time.sleep(max(interval, 0.05))
+            time.sleep(max(interval, 0.02))
 
     def sender_loop():
         nonlocal chat_history
@@ -577,16 +907,17 @@ def run_concurrent_bridge(
                     input_bounds = shared_state["input_bounds"]
                     send_bounds = shared_state["send_bounds"]
                     reply_bounds = shared_state.get("last_reply_bounds")
+                    has_draft = bool(shared_state.get("has_draft"))
                     nodes = list(shared_state["nodes"])
 
                 if not group_id:
-                    wake_sender.wait(timeout=0.2)
+                    wake_sender.wait(timeout=0.1)
                     wake_sender.clear()
                     continue
 
                 outbox = get_json(f"{backend_url.rstrip('/')}/outbox?group_id={group_id}&claim=true&limit=1")
                 if not outbox:
-                    wake_sender.wait(timeout=0.2)
+                    wake_sender.wait(timeout=0.1)
                     wake_sender.clear()
                     continue
 
@@ -602,10 +933,14 @@ def run_concurrent_bridge(
                             send_bounds=str(send_bounds),
                             text=text,
                             reply_bounds=str(reply_bounds) if reply_bounds else None,
+                            has_draft=has_draft,
                         )
                         if reply_bounds:
                             with state_lock:
                                 shared_state["last_reply_bounds"] = None
+                        if has_draft:
+                            with state_lock:
+                                shared_state["has_draft"] = False
                     elif nodes:
                         success = send_visible_message(adb, nodes, text)
                 except Exception as send_err:
@@ -662,6 +997,7 @@ def main() -> int:
         return 2
 
     adb = AdbClient(args.adb, args.serial)
+    adb.detect_adb_keyboard()
     seen: set[str] = set()
 
     if args.once:

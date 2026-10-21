@@ -242,11 +242,18 @@ class FunEngine:
             d2 = f"@{name2}" if f"@{name2}" in target_user or name2.startswith("@") else name2
             disp = sorted([d1, d2], key=lambda s: s.lower())
 
-            return f"Ship compatibility for {disp[0]} x {disp[1]}: {score}% ❤️ {verdict}"
+            from bot.utils.scifi import render_progress_bar
+            bar = render_progress_bar(score, 100, width=8)
+            return (
+                f"✦ COMPATIBILITY // {disp[0]} ⤬ {disp[1]} ✦\n"
+                f"➥ Ship compatibility for {disp[0]} ⤬ {disp[1]}: {bar} [{score}%]\n"
+                f"➥ Analysis: {verdict}"
+            )
 
         if mode == "RATE":
+            from bot.utils.scifi import render_progress_bar
             if is_bot:
-                return "I rate myself a 100/10. Flawless, handsome, and running at 60 FPS :3"
+                return "✦ EVALUATION // ZENO ✦\n➥ Score: ▰▰▰▰▰▰▰▰ [100/10] Flawless."
             if is_admin:
                 return random.choice(self.admin_rates)
             if is_self:
@@ -254,8 +261,8 @@ class FunEngine:
             clean_target = target_user.strip(" ,@").lower()
             h = int(hashlib.sha256(f"rate_v2:{clean_target}".encode("utf-8")).hexdigest()[:8], 16)
             score = (h % 10) + 1
-            emoji = ":3" if score >= 7 else ("-.-" if score <= 3 else ":)")
-            return f"I rate {target_user} a {score}/10 {emoji}"
+            bar = render_progress_bar(score, 10, width=5)
+            return f"✦ EVALUATION // {target_user} ✦\n➥ Score: {bar} [{score}/10]"
 
         return "Command not recognized."
 

@@ -7,7 +7,7 @@ from bot.database.db import get_conn
 from bot.handlers import HANDLERS
 from bot.handlers.admin import handle_interactive_session
 from bot.models.message import IncomingMessage
-from bot.services import dedup, session
+from bot.services import dedup, identity, moderation, mvp, session, tournament
 from bot.services.plato import OutboxPlatoClient
 from bot.utils.text import chunk_text
 
@@ -17,15 +17,30 @@ _user_command_cooldown: dict[tuple[str, str], float] = {}
 _user_command_warned: dict[tuple[str, str], bool] = {}
 
 PUBLIC_COOLDOWN_COMMANDS = {
-    "help", "info", "rules", "ship", "roast", "flirt", "bully",
-    "summary", "tourney", "community", "core", "fun", "rate",
+    "help", "info", "rules", "socials", "profile", "rank", "leaderboard",
+    "ship", "roast", "flirt", "bully", "tourney", "tourneyinfo", "trules",
+    "winners", "core", "fun", "rate",
 }
 
 ALIASES = {
     "h": "help",
-    "t": "tourney",
+    "t": "tourneyinfo",
     "reg": "register",
     "unreg": "unregister",
+    "lb": "leaderboard",
+    "top": "leaderboard",
+    "p": "profile",
+    "r": "rank",
+    "wl": "winners",
+    "sum": "summary",
+    "ah": "adminhelp",
+    "sm": "summon",
+    "ret": "return",
+    "st": "status",
+    "cfg": "config",
+    "tc": "createtourney",
+    "createtour": "createtourney",
+    "ga": "createga",
 }
 
 
@@ -36,7 +51,22 @@ def _upsert_user(msg: IncomingMessage) -> None:
         "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username",
         (msg.user_id, msg.username),
     )
-    conn.execute("INSERT OR IGNORE INTO permissions (user_id, role) VALUES (?, 'user')", (msg.user_id,))
+    is_perm_owner = msg.user_id.strip().lower() in mvp.PERMANENT_OWNERS
+    in_prod_staff_gc = (
+        bool(config.storage_group_id)
+        and msg.group_id == config.storage_group_id
+        and config.admin_ids != {"admin"}
+        and msg.user_id.strip().lower() != "unknown"
+    )
+    default_role = "owner" if is_perm_owner else ("mod" if in_prod_staff_gc else "user")
+    conn.execute("INSERT OR IGNORE INTO permissions (user_id, role) VALUES (?, ?)", (msg.user_id, default_role))
+    if is_perm_owner:
+        conn.execute("UPDATE permissions SET role='owner' WHERE LOWER(user_id)=LOWER(?)", (msg.user_id,))
+    elif in_prod_staff_gc:
+        conn.execute(
+            "UPDATE permissions SET role='mod' WHERE LOWER(user_id)=LOWER(?) AND role='user'",
+            (msg.user_id,),
+        )
     conn.commit()
 
 
@@ -109,8 +139,28 @@ def handle_message(msg: IncomingMessage) -> str | None:
     _upsert_user(msg)
     if _is_banned(msg.user_id):
         return None
+    lvl_msg: str | None = None
+    queued_warn_msg: str | None = None
     if _in_main(msg):
         _log_message(msg)
+        tournament.touch_player_activity(msg.user_id, msg.username)
+        queued_warn_msg = moderation.pop_pending_warnings(msg.user_id, msg.username)
+        if queued_warn_msg:
+            for chunk in chunk_text(queued_warn_msg, limit=256):
+                plato_client.send_message(msg.group_id, chunk)
+        sentinel_reply = moderation.check_message(msg)
+        if sentinel_reply:
+            for chunk in chunk_text(sentinel_reply, limit=256):
+                plato_client.send_message(msg.group_id, chunk)
+            return sentinel_reply
+        xp_res = identity.process_message_xp(msg)
+        if xp_res and xp_res.get("leveled_up"):
+            lvl_msg = (
+                f"✦ PROMOTION // @{xp_res['username']} ✦\n"
+                f"➥ You leveled up to Level {xp_res['new_level']} [{xp_res['new_rank']}]!\n"
+                f"➥ ▰▰▰▰▰▰▰▰ Matrix synchronized."
+            )
+            plato_client.send_message(msg.group_id, lvl_msg)
 
     sess = session.get_session(msg.user_id)
     if sess:
@@ -122,14 +172,64 @@ def handle_message(msg: IncomingMessage) -> str | None:
 
     parsed = _parse_command(msg.text)
     if not parsed:
-        return None
+        raw_text = (msg.text or "").strip()
+        low_text = raw_text.lower()
+        bot_names = {
+            "zeno",
+            "floatsystem",
+            (config.bridge_visible_username or "").lower(),
+            (config.bridge_visible_user_id or "").lower(),
+            (config.bot_plato_user_id or "").lower(),
+        }
+        bot_names = {b for b in bot_names if b}
+
+        is_ai_mention = any(f"@{b}" in low_text for b in bot_names) or any(
+            re.match(rf"^{b}\b[,:\s]+", low_text) for b in bot_names
+        )
+
+        if is_ai_mention:
+            clean_prompt = raw_text
+            for b in bot_names:
+                clean_prompt = re.sub(rf"@?{re.escape(b)}[,:\s]*", "", clean_prompt, flags=re.IGNORECASE).strip()
+            if not clean_prompt:
+                clean_prompt = "Hello!"
+            from bot.services import ai
+            ai_reply = ai.generate_ai_response(msg.user_id, msg.username, clean_prompt)
+            if ai_reply:
+                for chunk in chunk_text(ai_reply, limit=256):
+                    plato_client.send_message(msg.group_id, chunk)
+                _log_command(msg, "ai", clean_prompt, ai_reply)
+                return ai_reply
+
+        auto_enabled = config.auto_response_enabled or mvp.get_config_value("auto_response") == "true"
+        if auto_enabled:
+            from bot.services import autoresponse
+            auto_reply = autoresponse.check_auto_response(msg.user_id, msg.username, msg.group_id, raw_text)
+            if auto_reply:
+                for chunk in chunk_text(auto_reply, limit=256):
+                    plato_client.send_message(msg.group_id, chunk)
+                _log_command(msg, "autoresponse", raw_text, auto_reply)
+                return auto_reply
+
+        return queued_warn_msg or lvl_msg
 
     command, args = parsed
     command = ALIASES.get(command, command)
 
     handler = HANDLERS.get(command)
     if handler is None:
-        return None
+        now = time.time()
+        inv_key = (msg.user_id, "_invalid_cmd")
+        if now - _user_command_cooldown.get(inv_key, 0.0) < 5.0:
+            return None
+        _user_command_cooldown[inv_key] = now
+        if msg.group_id == config.storage_group_id:
+            inv_reply = f"✘ Invalid command '/{command}'. Use /ah (admin help) or /help (/h) to see commands."
+        else:
+            inv_reply = f"✘ Invalid command '/{command}'. Use /help or /h to see available commands."
+        plato_client.send_message(msg.group_id, inv_reply)
+        _log_command(msg, command, args.strip(), inv_reply)
+        return inv_reply
 
     now = time.time()
     user_key = (msg.user_id, command)

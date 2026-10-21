@@ -46,7 +46,12 @@ class Config:
     admin_ids: set[str] = field(default_factory=lambda: _parse_ids(os.getenv("ADMIN_IDS", "")))
     max_spam_repetitions: int = int(os.getenv("MAX_SPAM_REPETITIONS", "20"))
     spam_cooldown_seconds: float = float(os.getenv("SPAM_COOLDOWN_SECONDS", "10"))
+    bridge_send_y_open: int = int(os.getenv("PLATO_SEND_Y_OPEN", "1171"))
+    bridge_reply_tap_y: int = int(os.getenv("PLATO_REPLY_TAP_Y", "1572"))
     bot_timezone: str = os.getenv("BOT_TIMEZONE", "Asia/Kolkata")
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    auto_response_enabled: bool = os.getenv("ENABLE_AUTORESPONSE", "false").lower() in ("true", "1")
 
 
 config = Config()

@@ -52,7 +52,7 @@ def test_stress_mixed_rapid_commands_queue_order():
         ("u_c", "Charlie", "/register"),
         ("u_d", "Dave", "/ship @Alice @Bob"),
         ("u_e", "Eve", "/register"),
-        ("u_f", "Frank", "hello everyone!"),  # non-command
+        ("u_f", "Frank", "anyone ready to play?"),  # non-command
         ("u_g", "Grace", "/tourney"),
         ("u_h", "Hank", "/register"),
     ]
@@ -502,7 +502,7 @@ def test_native_reply_coordinates_default():
 
     sig = inspect.signature(AdbClient.fast_send)
     default_coords = sig.parameters["reply_tap_coords"].default
-    # Reply option in Plato is located at Y=1756 (Copy is at Y=1921)
-    assert default_coords == (229, 1756)
+    # Reply option in Plato on Redmi 6 Pro (1080x2280) is at Y=1572 (Copy is at Y=1737)
+    assert default_coords == (229, 1572)
 
 

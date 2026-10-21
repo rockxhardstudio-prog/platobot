@@ -66,7 +66,7 @@ def test_chunk_text_all_help_responses_fit():
     cfg.config.main_group_id = "main"
     try:
         msg = IncomingMessage("x","main","u","U","/help",False,"2026")
-        for cat in ["", "core", "community", "tourney", "fun"]:
+        for cat in ["", "core", "tourney", "fun"]:
             res = core._handle_help(msg, cat)
             assert len(res) <= 256, f"/help {cat!r} response is {len(res)} chars (>256)"
     finally:

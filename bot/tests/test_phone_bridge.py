@@ -494,7 +494,8 @@ def test_fast_send_builds_and_executes_single_shell_pipeline(monkeypatch):
         send_bounds="[838,2202][1000,2334]",
         text="Hello Plato! :3",
         reply_bounds="[44,591][1036,788]",
-        reply_tap_coords=(229, 1756),
+        reply_tap_coords=(229, 1572),
+        has_draft=True,
     )
 
     assert ok is True
@@ -503,17 +504,14 @@ def test_fast_send_builds_and_executes_single_shell_pipeline(monkeypatch):
 
     # Must contain swipe at message center (540, 689)
     assert "input swipe 540 689 540 689 450" in cmd
-    # Must tap Reply button at (229, 1756)
-    assert "input tap 229 1756" in cmd
-    # Must tap input box at center (540, 2268)
-    assert "input tap 540 2268" in cmd
-    # Must clear text field
-    assert "KEYCODE_CTRL_LEFT KEYCODE_A" in cmd
-    assert "input keyevent 67" in cmd
+    # Must tap Reply button at (229, 1572)
+    assert "input tap 229 1572" in cmd
+    # Must clear text field when has_draft is True
+    assert "input keyevent 123 67" in cmd
     # Must type text
     assert "input text Hello%sPlato!%s:3" in cmd
-    # Must tap send at (919, 1482)
-    assert "input tap 919 1482" in cmd
+    # Must tap send at (919, phone_bridge.config.bridge_send_y_open)
+    assert f"input tap 919 {phone_bridge.config.bridge_send_y_open}" in cmd
     # Must be joined with shell conditionals
     assert " && " in cmd
 
@@ -535,5 +533,39 @@ def test_dump_ui_fast_single_roundtrip():
     assert len(executed_shells) == 1
     assert "uiautomator dump --compressed" in executed_shells[0]
     assert "cat /sdcard/plato-bridge-window.xml" in executed_shells[0]
+
+
+def test_navigate_to_group_switches_from_main_to_staff_via_room_list(monkeypatch):
+    monkeypatch.setattr(phone_bridge.time, "sleep", lambda *_: None)
+    tapped = []
+
+    room_list_xml = """<?xml version="1.0" encoding="utf-8"?>
+    <hierarchy>
+      <node text="0 R D E R" resource-id="com.plato.android:id/room_title" bounds="[100,400][800,500]" />
+      <node text="base" resource-id="com.plato.android:id/room_title" bounds="[100,600][800,700]" />
+    </hierarchy>
+    """
+    staff_xml = _make_group_xml("base")
+
+    class NavAdb(phone_bridge.AdbClient):
+        def __init__(self):
+            super().__init__("adb")
+            self.dumps = [room_list_xml, staff_xml]
+
+        def tap_bounds(self, bounds: str) -> None:
+            tapped.append(bounds)
+
+        def shell(self, *args, timeout=20):
+            tapped.append(" ".join(args))
+            return 0, "", ""
+
+        def dump_ui(self) -> str:
+            return self.dumps.pop(0)
+
+    adb = NavAdb()
+    initial_nodes = phone_bridge.parse_ui_xml(_make_group_xml("0 R D E R"))
+    ok = phone_bridge.navigate_to_group(adb, initial_nodes, "base")
+    assert ok is True
+    assert "[100,600][800,700]" in tapped
 
 
